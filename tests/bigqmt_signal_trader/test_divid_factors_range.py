@@ -28,10 +28,12 @@ returned 5 -- that is the candidate scan finding nothing to scan, and it is
 why "no daily bars" now raises instead of answering {}.
 """
 
+import json
 import os
 import sys
 import unittest
 
+import pandas as pd
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(ROOT, "src"))
@@ -197,6 +199,94 @@ class PrefersARealRangeWhenOneExistsTest(unittest.TestCase):
         self.assertEqual(answer, {"1781193600000": DIVIDEND})
         self.assertEqual(native.calls, [("000001.SZ", "20240101", "20260904")])
         self.assertEqual(context.calls, [], "context should not be touched")
+
+
+class DataFrameRangeAnswerTest(unittest.TestCase):
+    """A reachable native SDK returns a frame, not the ContextInfo wire dict."""
+
+    COLUMNS = ["time", "interest", "stockBonus", "stockGift", "allotNum",
+               "allotPrice", "gugai", "dr"]
+
+    def frame(self):
+        # Deliberately keep rows non-chronological and columns reversed. The
+        # wire must preserve row order and select factor values by name.
+        frame = pd.DataFrame(
+            [[1781193600000.0, 0.36, 0.0, 0.0, 0.0, 0.0, 0.0, 1.032906],
+             [973440000000.0, 0.0, 0.0, 0.0, 0.3, 8.0, 0.0, 1.14489]],
+            index=["20260612", "20001106"], columns=self.COLUMNS,
+        )
+        return frame[list(reversed(self.COLUMNS))]
+
+    def provider(self, frame, use_context=False):
+        class ReturnsFrame(object):
+            def __init__(self):
+                self.calls = []
+
+            def get_divid_factors(self, *args):
+                self.calls.append(args)
+                return frame
+
+        context = ReturnsFrame() if use_context else Context()
+        native = None if use_context else ReturnsFrame()
+        return _provider(context, BARS, native), context
+
+    def test_native_frame_becomes_timestamp_keyed_factor_lists(self):
+        frame = self.frame()
+        original = frame.copy(deep=True)
+        provider, context = self.provider(frame)
+
+        answer = provider.get_divid_factors("000001.SZ", "19800101", "20300101")
+
+        self.assertEqual(answer, {
+            "1781193600000": [0.36, 0.0, 0.0, 0.0, 0.0, 0.0, 1.032906],
+            "973440000000": [0.0, 0.0, 0.0, 0.3, 8.0, 0.0, 1.14489],
+        })
+        self.assertEqual(list(answer), ["1781193600000", "973440000000"])
+        self.assertEqual(context.calls, [])
+        pd.testing.assert_frame_equal(frame, original, check_exact=True)
+
+    def test_context_range_frame_uses_the_same_wire_contract(self):
+        provider, _ = self.provider(self.frame(), use_context=True)
+        answer = provider.get_divid_factors("000001.SZ", "19800101", "20300101")
+        self.assertEqual(answer, {
+            "1781193600000": [0.36, 0.0, 0.0, 0.0, 0.0, 0.0, 1.032906],
+            "973440000000": [0.0, 0.0, 0.0, 0.3, 8.0, 0.0, 1.14489],
+        })
+
+    def test_empty_frame_keeps_existing_empty_answer_fallback(self):
+        for frame in (pd.DataFrame(), self.frame().iloc[:0]):
+            with self.subTest(columns=list(frame.columns)):
+                provider, _ = self.provider(frame)
+                context = Context({"20260612": {"1781193600000": DIVIDEND}})
+                provider.context_info = context
+                self.assertEqual(
+                    provider.get_divid_factors("000001.SZ", "20260101", "20260904"),
+                    {"1781193600000": DIVIDEND},
+                )
+
+    def test_incomplete_nonempty_frame_is_not_silently_treated_as_no_dividends(self):
+        provider, _ = self.provider(self.frame().drop(columns=["dr"]))
+        with self.assertRaises(KeyError):
+            provider.get_divid_factors("000001.SZ", "19800101", "20300101")
+
+    def test_wire_roundtrip_restores_exact_miniqmt_frame(self):
+        from bigqmt_signal_trader.redis_rpc import to_jsonable
+        from bigqmt_signal_trader.xtquant_compat import BigQmtXtData
+
+        frame = self.frame()
+        provider, _ = self.provider(frame)
+        answer = provider.get_divid_factors("000001.SZ", "19800101", "20300101")
+        wire = json.loads(json.dumps(to_jsonable(answer)))
+
+        class Client(object):
+            account_id = "test"
+
+            def call(self, method, params=None, **kwargs):
+                return wire
+
+        restored = BigQmtXtData(Client()).get_divid_factors(
+            "000001.SZ", "19800101", "20300101")
+        pd.testing.assert_frame_equal(restored, frame[self.COLUMNS], check_exact=True)
 
 
 class MissingDailyBarsSelfHealTest(unittest.TestCase):
