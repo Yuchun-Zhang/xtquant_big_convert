@@ -28,6 +28,7 @@ This module does not make trading decisions.
 
 import importlib
 import time
+from typing import Any, cast
 
 from ..code_utils import (
     EXCHANGE_TOKENS, FUTURES_MARKET_CODES, normalize_stock_code)
@@ -1362,9 +1363,9 @@ class BigQmtMarketDataProvider:
             # A single day was asked for; answer it directly.
             return self._call_context("get_divid_factors", stock_code, end or start)
 
-        for shape in (
-            lambda: self._native_divid_factors(stock_code, start, end),
-            lambda: self._call_context("get_divid_factors", stock_code, start, end),
+        for is_native, shape in (
+            (True, lambda: self._native_divid_factors(stock_code, start, end)),
+            (False, lambda: self._call_context("get_divid_factors", stock_code, start, end)),
         ):
             try:
                 answer = shape()
@@ -1376,6 +1377,10 @@ class BigQmtMarketDataProvider:
                 # Use its explicit millisecond time column, not the day index,
                 # and keep the existing wire format and server row order.
                 if getattr(answer, "empty"):
+                    # The native SDK accepts the full range. A successful empty
+                    # response is valid even when no daily bars are available.
+                    if is_native:
+                        return {}
                     continue
                 columns = ["time", "interest", "stockBonus", "stockGift",
                            "allotNum", "allotPrice", "gugai", "dr"]
@@ -1383,8 +1388,10 @@ class BigQmtMarketDataProvider:
                     str(int(row[0])): list(row[1:])
                     for row in getattr(answer, "loc")[:, columns].itertuples(index=False, name=None)
                 }
+            if is_native and isinstance(answer, dict) and not answer:
+                return {}
             if answer:
-                return dict(answer)
+                return dict(cast(Any, answer))
 
         return self._expand_divid_factors(stock_code, start, end)
 

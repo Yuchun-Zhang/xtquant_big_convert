@@ -253,16 +253,48 @@ class DataFrameRangeAnswerTest(unittest.TestCase):
             "973440000000": [0.0, 0.0, 0.0, 0.3, 8.0, 0.0, 1.14489],
         })
 
-    def test_empty_frame_keeps_existing_empty_answer_fallback(self):
-        for frame in (pd.DataFrame(), self.frame().iloc[:0]):
-            with self.subTest(columns=list(frame.columns)):
-                provider, _ = self.provider(frame)
+    def test_native_empty_range_returns_without_context_or_daily_scan(self):
+        for answer in (pd.DataFrame(), self.frame().iloc[:0], {}):
+            with self.subTest(answer_type=type(answer).__name__):
+                provider, context = self.provider(answer)
+
+                def unexpected_scan(**kwargs: object) -> None:
+                    self.fail("A successful native empty range must not scan daily bars")
+
+                provider.get_market_data_ex = unexpected_scan
+                self.assertEqual(
+                    provider.get_divid_factors("110818.SH", "19800101", "20300101"),
+                    {},
+                )
+                self.assertEqual(context.calls, [])
+
+    def test_context_empty_frame_still_uses_daily_scan(self):
+        provider, _ = self.provider(pd.DataFrame(), use_context=True)
+        provider.get_market_data_ex = lambda **kwargs: {}
+        with self.assertRaises(RuntimeError):
+            provider.get_divid_factors("110818.SH", "19800101", "20300101")
+
+    def test_native_unavailable_or_failed_range_keeps_fallback(self):
+        class FailingNative(object):
+            def get_divid_factors(self, *args: object) -> None:
+                raise RuntimeError("quote service unavailable")
+
+        class NoneNative(object):
+            def get_divid_factors(self, *args: object) -> None:
+                return None
+
+        for native in (None, NoneNative(), FailingNative()):
+            with self.subTest(native_type=type(native).__name__):
                 context = Context({"20260612": {"1781193600000": DIVIDEND}})
-                provider.context_info = context
+                provider = _provider(context, BARS, native=native)
                 self.assertEqual(
                     provider.get_divid_factors("000001.SZ", "20260101", "20260904"),
                     {"1781193600000": DIVIDEND},
                 )
+
+                provider = _provider(Context(), [], native=native)
+                with self.assertRaises(RuntimeError):
+                    provider.get_divid_factors("110818.SH", "19800101", "20300101")
 
     def test_incomplete_nonempty_frame_is_not_silently_treated_as_no_dividends(self):
         provider, _ = self.provider(self.frame().drop(columns=["dr"]))
