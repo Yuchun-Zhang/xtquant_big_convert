@@ -1370,6 +1370,19 @@ class BigQmtMarketDataProvider:
                 answer = shape()
             except Exception:
                 continue
+            if hasattr(answer, "columns") and hasattr(answer, "itertuples"):
+                # Native xtdata can return a DataFrame. Neither bool(frame)
+                # nor dict(frame) has the semantics of the RPC factor dict.
+                # Use its explicit millisecond time column, not the day index,
+                # and keep the existing wire format and server row order.
+                if getattr(answer, "empty"):
+                    continue
+                columns = ["time", "interest", "stockBonus", "stockGift",
+                           "allotNum", "allotPrice", "gugai", "dr"]
+                return {
+                    str(int(row[0])): list(row[1:])
+                    for row in getattr(answer, "loc")[:, columns].itertuples(index=False, name=None)
+                }
             if answer:
                 return dict(answer)
 
